@@ -26,6 +26,34 @@ MODEL_CFG = dict[str, str | int | float]
 logger = get_logger("chat")
 
 
+def text_from_openai_stream_event(event: object) -> str | None:
+    """Extract text from one OpenAI stream event.
+
+    adalflow's OpenAI client now calls the Responses API, whose first event is
+    ``ResponseCreatedEvent`` and whose text arrives as ``response.output_text.delta``.
+    Azure (and older chat-completions streams) still yield chunks with ``choices``.
+    """
+    event_type = getattr(event, "type", None)
+    if event_type == "error":
+        message = getattr(event, "message", None) or "OpenAI stream error"
+        raise RuntimeError(str(message))
+    if event_type == "response.failed":
+        response = getattr(event, "response", None)
+        err = getattr(response, "error", None)
+        message = getattr(err, "message", None) or "OpenAI response failed"
+        raise RuntimeError(str(message))
+    if event_type == "response.output_text.delta":
+        delta = getattr(event, "delta", None)
+        return delta if isinstance(delta, str) and delta else None
+
+    choices = getattr(event, "choices", None)
+    if not choices:
+        return None
+    delta = getattr(choices[0], "delta", None)
+    content = getattr(delta, "content", None) if delta is not None else None
+    return content or None
+
+
 class ChatStreamer(ABC):
     _registry: dict[str, type["ChatStreamer"]] = {}
     provider: str
@@ -165,12 +193,9 @@ class _OpenAICompatStreamer(ChatStreamer):
         )
 
         async for chunk in response:
-            if (
-                chunk.choices
-                and chunk.choices[0].delta is not None
-                and chunk.choices[0].delta.content is not None
-            ):
-                yield chunk.choices[0].delta.content
+            text = text_from_openai_stream_event(chunk)
+            if text:
+                yield text
 
 
 class OpenAIChatStreamer(_OpenAICompatStreamer):
